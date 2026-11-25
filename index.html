@@ -190,6 +190,14 @@
   .rx-f{position:absolute;height:12pt;line-height:12pt;font-size:10pt;font-weight:600;
     white-space:nowrap;overflow:hidden;text-overflow:clip;
     margin-left:var(--rx-dx);margin-top:var(--rx-dy);}
+  /* ---------- Sidebar toggle ---------- */
+  #app.sb-hidden{grid-template-columns:1fr;}
+  #app.sb-hidden .sidebar{display:none;}
+  .sb-open-btn{display:none;position:fixed;top:12px;left:12px;z-index:40;background:var(--teal);color:#fff;border:none;border-radius:8px;padding:9px 14px;font-weight:600;font-size:13px;box-shadow:var(--shadow);}
+  .sb-open-btn:hover{background:var(--teal-dark);}
+  #app.active.sb-hidden ~ .sb-open-btn{display:block;}
+  #app.sb-hidden .main{padding-top:64px;}
+  @media print{.sb-open-btn{display:none !important;}}
 </style>
 </head>
 <body>
@@ -239,12 +247,15 @@
     <div class="sidebar-footer">
       <div id="syncBadge" style="font-size:11.5px;color:rgba(255,255,255,0.75);margin-bottom:10px;display:flex;align-items:center;"></div>
       <div class="who"><b id="whoName"></b><span id="whoRole"></span></div>
+      <button class="btn btn-ghost btn-sm" style="width:100%;color:#fff;border-color:rgba(255,255,255,0.25);margin-bottom:6px;" onclick="toggleSidebar()">Hide menu</button>
       <button class="btn btn-ghost btn-sm" style="width:100%;color:#fff;border-color:rgba(255,255,255,0.25);margin-bottom:6px;" onclick="manualSync()">Sync now</button>
       <button class="btn btn-ghost btn-sm" style="width:100%;color:#fff;border-color:rgba(255,255,255,0.25);" onclick="logout()">Sign out</button>
     </div>
   </div>
   <div class="main" id="mainArea"></div>
 </div>
+
+<button class="sb-open-btn" onclick="toggleSidebar()">☰ Menu</button>
 
 <!-- ============ Generic Modal ============ -->
 <div class="modal-bg" id="modalBg">
@@ -382,6 +393,19 @@ async function manualSync(){
   render();
 }
 
+/* ===================== SIDEBAR TOGGLE ===================== */
+function applySidebar(){
+  let hidden = false;
+  try{ hidden = localStorage.getItem('clinicops_sidebar_hidden')==='1'; }catch(e){}
+  document.getElementById('app').classList.toggle('sb-hidden', hidden);
+}
+function toggleSidebar(){
+  const app = document.getElementById('app');
+  const hidden = !app.classList.contains('sb-hidden');
+  app.classList.toggle('sb-hidden', hidden);
+  try{ localStorage.setItem('clinicops_sidebar_hidden', hidden?'1':'0'); }catch(e){}
+}
+
 /* ===================== LOGIN ===================== */
 function doLogin(){
   const role = document.getElementById('loginRole').value;
@@ -410,6 +434,7 @@ const NAV = {
     {id:'dashboard', label:'Dashboard'},
     {id:'reception', label:'Patient Entry'},
     {id:'billing', label:'Billing'},
+    {id:'editpatients', label:'Edit Patient Details'},
     {id:'whatsapp', label:'WhatsApp'},
     {id:'employees', label:'Staff & Access'},
     {id:'settings', label:'Villages, Fee & Treatments'},
@@ -439,6 +464,7 @@ function boot(){
   if(!SESSION){ document.getElementById('loginScreen').style.display='flex'; return; }
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('app').classList.add('active');
+  applySidebar();
   document.getElementById('whoName').textContent = roleLabel(SESSION.role);
   document.getElementById('whoRole').textContent = SESSION.role==='admin'?'Admin access':(isDoctorRole(SESSION.role)?'Doctor access':'Front desk access');
 
@@ -688,6 +714,60 @@ function printEntryForm(id){
       ${f(p.address||'',        112, 175, 440)}
     </div>`;
   window.print();
+}
+
+/* ---- Admin: Edit patient name & phone ---- */
+function escAttr(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+RENDERERS.editpatients = function(){
+  if(!SESSION || SESSION.role!=='admin'){ document.getElementById('mainArea').innerHTML = '<div class="card"><div class="empty"><b>Admin only</b>You do not have access to this page.</div></div>'; return; }
+  document.getElementById('mainArea').innerHTML = `
+    <div class="page-head"><div><div class="eyebrow">Admin</div><h2>Edit Patient Details</h2><p>Correct a patient's name or phone number. Patient ID stays the same.</p></div></div>
+    <div class="card">
+      <div class="toolbar">
+        <input type="text" id="epSearch" placeholder="Search by name, phone or Patient ID" oninput="renderEditPatientList()">
+      </div>
+      <div id="epList"></div>
+    </div>`;
+  renderEditPatientList();
+};
+function renderEditPatientList(){
+  const q = (document.getElementById('epSearch').value||'').toLowerCase().trim();
+  let list = DATA.patients.filter(p=> !q || String(p.name||'').toLowerCase().includes(q) || String(p.id||'').toLowerCase().includes(q) || String(p.contact||'').toLowerCase().includes(q));
+  list = list.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).slice(0,50);
+  const el = document.getElementById('epList');
+  if(!list.length){ el.innerHTML = `<div class="empty"><b>No matches</b>Try a different name, phone or ID.</div>`; return; }
+  el.innerHTML = `<table><thead><tr><th>ID</th><th>Name</th><th>Phone</th><th>Entry date</th><th></th></tr></thead><tbody>
+    ${list.map(p=>`<tr>
+      <td><span class="id-chip">${escAttr(p.id)}</span></td><td>${escAttr(p.name)}</td><td>${escAttr(p.contact)||'—'}</td><td>${fmtDate(p.date)}</td>
+      <td><button class="btn btn-ghost btn-sm" onclick="openEditPatient('${escAttr(p.id)}')">Edit</button></td>
+    </tr>`).join('')}
+  </tbody></table>${DATA.patients.length>50?'<div class="field-note" style="margin-top:8px;">Showing the 50 most recent matches — search to narrow down.</div>':''}`;
+}
+function openEditPatient(id){
+  if(!SESSION || SESSION.role!=='admin') return;
+  const p = findPatient(id); if(!p) return;
+  openModal(`
+    <div class="modal-head"><h3>Edit details <span class="id-chip">${escAttr(p.id)}</span></h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="field"><label>Patient name *</label><input type="text" id="epName" value="${escAttr(p.name)}"></div>
+    <div class="field"><label>Phone number</label><input type="text" id="epPhone" value="${escAttr(p.contact)}" placeholder="e.g. 9876543210"><div class="field-note">Leave blank to clear the number. Use at least 10 digits if entering one.</div></div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-primary" onclick="saveEditPatient('${escAttr(p.id)}')">Save changes</button>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+    </div>
+  `);
+}
+function saveEditPatient(id){
+  if(!SESSION || SESSION.role!=='admin'){ alert('Only admin can edit patient details.'); return; }
+  const p = findPatient(id); if(!p) return;
+  const name = document.getElementById('epName').value.trim();
+  const phone = document.getElementById('epPhone').value.trim();
+  if(!name){ alert('Patient name cannot be empty.'); return; }
+  if(phone && phone.replace(/\D/g,'').length < 10){ alert('Phone number looks too short. Enter at least 10 digits, or leave it blank.'); return; }
+  p.name = name;
+  p.contact = phone;
+  saveData();
+  closeModal();
+  render();
 }
 
 /* ---- Receptionist: Today's Patients list ---- */
