@@ -198,6 +198,19 @@
   #app.active.sb-hidden ~ .sb-open-btn{display:block;}
   #app.sb-hidden .main{padding-top:64px;}
   @media print{.sb-open-btn{display:none !important;}}
+  /* ---------- Dashboard charts ---------- */
+  .chart-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px;}
+  .chart-head h3{margin:0;}
+  .chart-head select{padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);font-size:13px;color:var(--ink);}
+  .bars{display:flex;align-items:flex-end;gap:10px;height:190px;padding:18px 4px 0;border-bottom:1px solid var(--line);overflow-x:auto;}
+  .bar-col{flex:1;min-width:34px;max-width:90px;height:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;}
+  .bar-val{font-size:11.5px;font-weight:700;color:var(--ink);margin-bottom:4px;}
+  .bar{width:100%;border-radius:6px 6px 0 0;background:var(--teal);min-height:2px;transition:height .25s ease;}
+  .bar.dim{background:#9CC9C2;}
+  .bar.zero{background:var(--line);}
+  .bar-labels{display:flex;gap:10px;padding:6px 4px 0;overflow-x:auto;}
+  .bar-labels span{flex:1;min-width:34px;max-width:90px;text-align:center;font-size:11.5px;color:var(--ink-soft);font-weight:600;}
+  .chart-note{font-size:12px;color:var(--ink-soft);margin-top:10px;}
 </style>
 </head>
 <body>
@@ -938,6 +951,44 @@ function printBillFor(id){
   window.print();
 }
 
+/* ---- Admin: Dashboard charts (year-wise + month-wise patient visits) ---- */
+let DASH_YEAR = null;
+function patientYear(p){ const y = parseInt(String(p.date||'').slice(0,4),10); return isNaN(y)?null:y; }
+function barChart(items, max, highlightKey){
+  const top = Math.max(max,1);
+  return `<div class="bars">${items.map(it=>`<div class="bar-col"><div class="bar-val">${it.value}</div><div class="bar ${it.value===0?'zero':''} ${highlightKey!=null && it.key!==highlightKey?'dim':''}" style="height:${Math.max(it.value/top*100,1)}%" title="${it.label}: ${it.value}"></div></div>`).join('')}</div>
+  <div class="bar-labels">${items.map(it=>`<span>${it.label}</span>`).join('')}</div>`;
+}
+function dashChartsHtml(){
+  const curYear = new Date().getFullYear();
+  const counts = {};
+  DATA.patients.forEach(p=>{ const y=patientYear(p); if(y) counts[y]=(counts[y]||0)+1; });
+  counts[curYear] = counts[curYear]||0;           // a new year appears automatically on 1 Jan
+  const years = Object.keys(counts).map(Number).sort((a,b)=>a-b);
+  if(DASH_YEAR===null || !years.includes(DASH_YEAR)) DASH_YEAR = curYear;
+  const yearItems = years.map(y=>({key:y,label:String(y),value:counts[y]}));
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const mc = new Array(12).fill(0);
+  DATA.patients.forEach(p=>{ if(patientYear(p)===DASH_YEAR){ const m=parseInt(String(p.date).slice(5,7),10)-1; if(m>=0&&m<12) mc[m]++; } });
+  const monthItems = months.map((m,i)=>({key:i,label:m,value:mc[i]}));
+  const yearTotal = mc.reduce((a,b)=>a+b,0);
+  const best = yearTotal ? months[mc.indexOf(Math.max(...mc))] : '—';
+  return `
+    <div class="card">
+      <div class="chart-head"><h3>Patient visits — year wise</h3></div>
+      ${barChart(yearItems, Math.max(...yearItems.map(i=>i.value)), DASH_YEAR)}
+      <div class="chart-note">Each bar is one calendar year. A new year is added automatically when the year changes.</div>
+    </div>
+    <div class="card">
+      <div class="chart-head">
+        <h3>Patient visits — month wise (${DASH_YEAR})</h3>
+        <select onchange="DASH_YEAR=Number(this.value);render()">${years.slice().reverse().map(y=>`<option value="${y}" ${y===DASH_YEAR?'selected':''}>${y}</option>`).join('')}</select>
+      </div>
+      ${barChart(monthItems, Math.max(...mc), null)}
+      <div class="chart-note">Total in ${DASH_YEAR}: <b>${yearTotal}</b> patients · Busiest month: <b>${best}</b></div>
+    </div>`;
+}
+
 /* ---- Admin: Dashboard ---- */
 RENDERERS.dashboard = function(){
   const today = todayStr();
@@ -956,6 +1007,7 @@ RENDERERS.dashboard = function(){
       <div class="stat"><div class="n">${money(totalCollected)}</div><div class="l">Total collected</div></div>
       <div class="stat"><div class="n">${money(pendingBalance)}</div><div class="l">Pending balance</div></div>
     </div>
+    ${dashChartsHtml()}
     <div class="card">
       <h3>Patients per doctor</h3>
       <div class="grid3">
