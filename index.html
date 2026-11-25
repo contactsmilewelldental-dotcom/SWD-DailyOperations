@@ -210,6 +210,16 @@
   .bar.zero{background:var(--line);}
   .bar-labels{display:flex;gap:10px;padding:6px 4px 0;overflow-x:auto;}
   .bar-labels span{flex:1;min-width:34px;max-width:90px;text-align:center;font-size:11.5px;color:var(--ink-soft);font-weight:600;}
+  .bar.blue{background:#3B6FB6;} .bar.blue.dim{background:#A9C0E3;}
+  .bar.gold{background:#C98A1E;} .bar.gold.dim{background:#E6C98F;}
+  .bar.blue.zero,.bar.gold.zero{background:var(--line);}
+  .chart-pair{display:grid;grid-template-columns:1fr 1fr;gap:18px;}
+  @media(max-width:1000px){.chart-pair{grid-template-columns:1fr;}}
+  .btn-xl{background:#3B6FB6;color:#fff;}
+  .btn-xl:hover{background:#2D5791;}
+  .log-row{display:grid;grid-template-columns:150px 1fr;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font-size:12.5px;}
+  .log-row:last-child{border-bottom:none;}
+  .log-when{color:var(--ink-soft);}
   .chart-note{font-size:12px;color:var(--ink-soft);margin-top:10px;}
 </style>
 </head>
@@ -742,6 +752,13 @@ RENDERERS.editpatients = function(){
       <div id="epList"></div>
     </div>`;
   renderEditPatientList();
+  const logs = [];
+  DATA.patients.forEach(p=>(p.editLog||[]).forEach(e=>logs.push({e,p})));
+  logs.sort((a,b)=>new Date(b.e.at)-new Date(a.e.at));
+  document.getElementById('mainArea').insertAdjacentHTML('beforeend', `
+    <div class="card"><h3>Recent changes</h3>
+      ${logs.length ? logs.slice(0,20).map(x=>logRowHtml(x.e,x.p)).join('') : '<div class="field-note">No name or phone changes have been made yet.</div>'}
+    </div>`);
 };
 function renderEditPatientList(){
   const q = (document.getElementById('epSearch').value||'').toLowerCase().trim();
@@ -756,6 +773,10 @@ function renderEditPatientList(){
     </tr>`).join('')}
   </tbody></table>${DATA.patients.length>50?'<div class="field-note" style="margin-top:8px;">Showing the 50 most recent matches — search to narrow down.</div>':''}`;
 }
+function logRowHtml(e, who){
+  const txt = e.changes.map(c=>`${c.field}: <b>${escAttr(c.from)||'(blank)'}</b> → <b>${escAttr(c.to)||'(blank)'}</b>`).join('<br>');
+  return `<div class="log-row"><div class="log-when">${new Date(e.at).toLocaleString('en-GB')}<br>by ${escAttr(e.by)}</div><div>${who?`<span class="id-chip">${escAttr(who.id)}</span> `:''}${txt}</div></div>`;
+}
 function openEditPatient(id){
   if(!SESSION || SESSION.role!=='admin') return;
   const p = findPatient(id); if(!p) return;
@@ -767,6 +788,9 @@ function openEditPatient(id){
       <button class="btn btn-primary" onclick="saveEditPatient('${escAttr(p.id)}')">Save changes</button>
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
     </div>
+    <div style="margin-top:18px;"><h3 style="font-size:13.5px;margin-bottom:6px;">Edit history</h3>
+      ${(p.editLog&&p.editLog.length) ? p.editLog.slice().reverse().map(e=>logRowHtml(e)).join('') : '<div class="field-note">No changes made yet.</div>'}
+    </div>
   `);
 }
 function saveEditPatient(id){
@@ -776,6 +800,12 @@ function saveEditPatient(id){
   const phone = document.getElementById('epPhone').value.trim();
   if(!name){ alert('Patient name cannot be empty.'); return; }
   if(phone && phone.replace(/\D/g,'').length < 10){ alert('Phone number looks too short. Enter at least 10 digits, or leave it blank.'); return; }
+  const changes = [];
+  if(name !== p.name) changes.push({field:'Name', from:p.name||'', to:name});
+  if(phone !== (p.contact||'')) changes.push({field:'Phone', from:p.contact||'', to:phone});
+  if(!changes.length){ closeModal(); return; }
+  p.editLog = p.editLog || [];
+  p.editLog.push({at:new Date().toISOString(), by:(SESSION.name||'Admin'), changes});
   p.name = name;
   p.contact = phone;
   saveData();
@@ -954,39 +984,89 @@ function printBillFor(id){
 /* ---- Admin: Dashboard charts (year-wise + month-wise patient visits) ---- */
 let DASH_YEAR = null;
 function patientYear(p){ const y = parseInt(String(p.date||'').slice(0,4),10); return isNaN(y)?null:y; }
-function barChart(items, max, highlightKey){
+function barChart(items, max, highlightKey, cls, fmt){
   const top = Math.max(max,1);
-  return `<div class="bars">${items.map(it=>`<div class="bar-col"><div class="bar-val">${it.value}</div><div class="bar ${it.value===0?'zero':''} ${highlightKey!=null && it.key!==highlightKey?'dim':''}" style="height:${Math.max(it.value/top*100,1)}%" title="${it.label}: ${it.value}"></div></div>`).join('')}</div>
+  const f = fmt || (v=>v);
+  return `<div class="bars">${items.map(it=>`<div class="bar-col"><div class="bar-val">${f(it.value)}</div><div class="bar ${cls||''} ${it.value===0?'zero':''} ${highlightKey!=null && it.key!==highlightKey?'dim':''}" style="height:${Math.max(it.value/top*100,1)}%" title="${it.label}: ${f(it.value)}"></div></div>`).join('')}</div>
   <div class="bar-labels">${items.map(it=>`<span>${it.label}</span>`).join('')}</div>`;
 }
-function dashChartsHtml(){
+function shortMoney(n){ n=Number(n||0); return n>=100000 ? '₹'+(n/100000).toFixed(1)+'L' : n>=1000 ? '₹'+(n/1000).toFixed(1)+'k' : '₹'+n; }
+/* Money collected = OP fees marked Paid (on entry date) + every installment (on its payment date) */
+function moneyEvents(){
+  const ev = [];
+  DATA.patients.forEach(p=>{
+    if(p.status==='Paid' && Number(p.opFee||0)>0) ev.push({date:p.date, amount:Number(p.opFee)});
+    (p.payments||[]).forEach(x=>ev.push({date:x.date, amount:Number(x.amount||0)}));
+  });
+  return ev;
+}
+function monthIdx(d){ const m=parseInt(String(d||'').slice(5,7),10)-1; return (m>=0&&m<12)?m:-1; }
+function yearOf(d){ const y=parseInt(String(d||'').slice(0,4),10); return isNaN(y)?null:y; }
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function chartStats(){
   const curYear = new Date().getFullYear();
-  const counts = {};
-  DATA.patients.forEach(p=>{ const y=patientYear(p); if(y) counts[y]=(counts[y]||0)+1; });
-  counts[curYear] = counts[curYear]||0;           // a new year appears automatically on 1 Jan
-  const years = Object.keys(counts).map(Number).sort((a,b)=>a-b);
+  const pc = {}, mc = {};
+  DATA.patients.forEach(p=>{ const y=patientYear(p); if(y) pc[y]=(pc[y]||0)+1; });
+  moneyEvents().forEach(e=>{ const y=yearOf(e.date); if(y) mc[y]=(mc[y]||0)+e.amount; });
+  pc[curYear]=pc[curYear]||0;
+  const years = [...new Set([...Object.keys(pc),...Object.keys(mc)].map(Number))].sort((a,b)=>a-b);
   if(DASH_YEAR===null || !years.includes(DASH_YEAR)) DASH_YEAR = curYear;
-  const yearItems = years.map(y=>({key:y,label:String(y),value:counts[y]}));
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const mc = new Array(12).fill(0);
-  DATA.patients.forEach(p=>{ if(patientYear(p)===DASH_YEAR){ const m=parseInt(String(p.date).slice(5,7),10)-1; if(m>=0&&m<12) mc[m]++; } });
-  const monthItems = months.map((m,i)=>({key:i,label:m,value:mc[i]}));
-  const yearTotal = mc.reduce((a,b)=>a+b,0);
-  const best = yearTotal ? months[mc.indexOf(Math.max(...mc))] : '—';
+  const visitsM = new Array(12).fill(0), moneyM = new Array(12).fill(0);
+  DATA.patients.forEach(p=>{ if(patientYear(p)===DASH_YEAR){ const m=monthIdx(p.date); if(m>=0) visitsM[m]++; } });
+  moneyEvents().forEach(e=>{ if(yearOf(e.date)===DASH_YEAR){ const m=monthIdx(e.date); if(m>=0) moneyM[m]+=e.amount; } });
+  return {years, pc, mc, visitsM, moneyM};
+}
+function dashChartsHtml(){
+  const st = chartStats();
+  const yearItems = st.years.map(y=>({key:y,label:String(y),value:st.pc[y]||0}));
+  const vItems = MONTHS.map((m,i)=>({key:i,label:m,value:st.visitsM[i]}));
+  const mItems = MONTHS.map((m,i)=>({key:i,label:m,value:st.moneyM[i]}));
+  const vTotal = st.visitsM.reduce((a,b)=>a+b,0), mTotal = st.moneyM.reduce((a,b)=>a+b,0);
+  const bestV = vTotal ? MONTHS[st.visitsM.indexOf(Math.max(...st.visitsM))] : '—';
+  const bestM = mTotal ? MONTHS[st.moneyM.indexOf(Math.max(...st.moneyM))] : '—';
+  const yearSel = `<select onchange="DASH_YEAR=Number(this.value);render()">${st.years.slice().reverse().map(y=>`<option value="${y}" ${y===DASH_YEAR?'selected':''}>${y}</option>`).join('')}</select>`;
   return `
     <div class="card">
-      <div class="chart-head"><h3>Patient visits — year wise</h3></div>
-      ${barChart(yearItems, Math.max(...yearItems.map(i=>i.value)), DASH_YEAR)}
+      <div class="chart-head"><h3>Patient visits — year wise</h3>
+        <button class="btn btn-xl btn-sm" onclick="downloadYearlyData()">⬇ Download yearly data (Excel)</button></div>
+      ${barChart(yearItems, Math.max(...yearItems.map(i=>i.value)), DASH_YEAR, 'blue')}
       <div class="chart-note">Each bar is one calendar year. A new year is added automatically when the year changes.</div>
     </div>
-    <div class="card">
-      <div class="chart-head">
-        <h3>Patient visits — month wise (${DASH_YEAR})</h3>
-        <select onchange="DASH_YEAR=Number(this.value);render()">${years.slice().reverse().map(y=>`<option value="${y}" ${y===DASH_YEAR?'selected':''}>${y}</option>`).join('')}</select>
+    <div class="chart-head" style="margin-bottom:10px;"><h3>Month wise — ${DASH_YEAR}</h3><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">${yearSel}<button class="btn btn-xl btn-sm" onclick="downloadMonthlyData()">⬇ Download monthly data (Excel)</button></div></div>
+    <div class="chart-pair">
+      <div class="card">
+        <div class="chart-head"><h3>Patient visits per month</h3></div>
+        ${barChart(vItems, Math.max(...st.visitsM), null, 'blue')}
+        <div class="chart-note">Total: <b>${vTotal}</b> patients · Busiest: <b>${bestV}</b></div>
       </div>
-      ${barChart(monthItems, Math.max(...mc), null)}
-      <div class="chart-note">Total in ${DASH_YEAR}: <b>${yearTotal}</b> patients · Busiest month: <b>${best}</b></div>
+      <div class="card">
+        <div class="chart-head"><h3>Money collected per month</h3></div>
+        ${barChart(mItems, Math.max(...st.moneyM), null, 'gold', shortMoney)}
+        <div class="chart-note">Total: <b>${money(mTotal)}</b> · Best month: <b>${bestM}</b></div>
+      </div>
     </div>`;
+}
+function xlReady(){
+  if(typeof XLSX==='undefined'){ alert('Excel library did not load. Check your internet connection and try again.'); return false; }
+  return true;
+}
+function downloadYearlyData(){
+  if(!xlReady()) return;
+  const st = chartStats();
+  const rows = st.years.map(y=>({'Year':y,'Patients':st.pc[y]||0,'Money collected (₹)':st.mc[y]||0}));
+  rows.push({'Year':'Total','Patients':rows.reduce((a,r)=>a+r['Patients'],0),'Money collected (₹)':rows.reduce((a,r)=>a+r['Money collected (₹)'],0)});
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Yearly');
+  XLSX.writeFile(wb, 'SmileWell_yearly_data.xlsx');
+}
+function downloadMonthlyData(){
+  if(!xlReady()) return;
+  const st = chartStats();
+  const rows = MONTHS.map((m,i)=>({'Month':m+' '+DASH_YEAR,'Patients':st.visitsM[i],'Money collected (₹)':st.moneyM[i]}));
+  rows.push({'Month':'Total','Patients':st.visitsM.reduce((a,b)=>a+b,0),'Money collected (₹)':st.moneyM.reduce((a,b)=>a+b,0)});
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Monthly '+DASH_YEAR);
+  XLSX.writeFile(wb, 'SmileWell_monthly_data_'+DASH_YEAR+'.xlsx');
 }
 
 /* ---- Admin: Dashboard ---- */
