@@ -360,7 +360,7 @@ function fbApplyConfig(c){
   if(c.settings) DATA.settings = c.settings;
   if(c.villages) DATA.villages = c.villages;
   if(c.treatments) DATA.treatments = c.treatments;
-  if(typeof c.idCounter==='number') DATA.idCounter = Math.max(DATA.idCounter||0, c.idCounter);
+  if(typeof c.idCounter==='number' && c.idCounter>=0 && c.idCounter<=999999) DATA.idCounter = Math.max(DATA.idCounter||0, c.idCounter);   // ignore corrupted huge counters
 }
 async function fbLoadAll(){
   const base = defaultData();
@@ -373,7 +373,7 @@ async function fbLoadAll(){
   DATA.patients = snap.docs.map(d=>d.data());
   DATA.patients.forEach(p=>{ FB_SAVED[p.id] = JSON.stringify(p); });
   // keep idCounter ahead of any existing patient number
-  DATA.patients.forEach(p=>{ const n = parseInt(String(p.id).replace(/\D/g,''),10); if(n>(DATA.idCounter||0)) DATA.idCounter = n; });
+  DATA.patients.forEach(p=>{ const m = /-(\d{1,6})$/.exec(String(p.id)); const n = m ? parseInt(m[1],10) : 0; if(n>(DATA.idCounter||0)) DATA.idCounter = n; });   // only the number after the last '-'
   setCache(DATA);
   SYNC_STATE = 'connected'; SYNC_MSG = 'Synced ' + new Date().toLocaleTimeString();
 }
@@ -727,10 +727,14 @@ function render(){ RENDERERS[CURRENT_VIEW] && RENDERERS[CURRENT_VIEW](); updateS
 
 /* ===================== HELPERS ===================== */
 function genPatientId(){
-  DATA.idCounter += 1;
-  saveData();
   const yr = new Date().getFullYear();
-  return `P${yr}-${String(DATA.idCounter).padStart(4,'0')}`;
+  let id;
+  do{
+    DATA.idCounter += 1;
+    id = `P${yr}-${String(DATA.idCounter).padStart(4,'0')}`;
+  }while(DATA.patients.some(p=>p.id===id));   // never reuse an existing ID
+  saveData();
+  return id;
 }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 function fmtDate(d){ if(!d) return '—'; const dt=new Date(d+'T00:00:00'); return dt.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}); }
