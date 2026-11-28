@@ -867,7 +867,7 @@ function openDoctorPanel(id){
     </div>
     <div class="field"><label>Suggested treatment (optional)</label><select id="mTreat">${treatOpts}</select></div>
     <div class="grid2">
-      <div class="field"><label>Treatment fee (optional)</label><input type="number" id="mFee" value="${p.fee||''}" placeholder="Total fee"></div>
+      <div class="field"><label>Treatment fee (optional)</label><input type="number" id="mFee" value="${p.fee||''}" placeholder="Total fee" ${feeIsLocked(p)?'readonly disabled style="background:var(--surface-2);cursor:not-allowed;"':''}>${feeIsLocked(p)?'<div class="field-note">Locked. Only admin can add extra amount.</div>':''}</div>
       <div class="field"><label>Next date of visit (optional)</label><input type="date" id="mNext" value="${p.nextVisit||''}"></div>
     </div>
     <div class="field"><label>Note / comment</label><textarea id="mNote" rows="3" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;">${p.notes||''}</textarea></div>
@@ -889,7 +889,7 @@ function renderInstallments(p){
 function saveDoctorNotes(id){
   const p = findPatient(id); if(!p) return;
   p.suggestedTreatment = document.getElementById('mTreat').value;
-  p.fee = document.getElementById('mFee').value;
+  if(!feeIsLocked(p)){ const f = Number(document.getElementById('mFee').value||0); if(f>0) p.fee = f; }
   p.nextVisit = document.getElementById('mNext').value;
   p.notes = document.getElementById('mNote').value;
   saveData();
@@ -927,13 +927,27 @@ function renderBillingSearch(){
     </tr>`).join('')}
   </tbody></table>`;
 }
+function feeIsLocked(p){ return Number(p.fee||0) > 0; }
+function isAdminUser(){ return !!(SESSION && SESSION.role==='admin'); }
+function feeFieldsHtml(p){
+  if(!feeIsLocked(p)){
+    // New entry: fee not yet set -> anyone can enter it once
+    return `<div class="field"><label>Total treatment fee</label><input type="number" id="iTotalFee" value="" placeholder="Enter total fee (one time)"></div>`;
+  }
+  // Fee already entered -> read-only for doctor & receptionist
+  let html = `<div class="field"><label>Total treatment fee</label><input type="number" id="iTotalFee" value="${p.fee}" readonly disabled style="background:var(--surface-2);cursor:not-allowed;"><div class="field-note">Locked. Only admin can add extra amount.</div></div>`;
+  if(isAdminUser()){
+    html += `<div class="field"><label>Added / extra treatment amount (admin only)</label><input type="number" id="iExtraFee" min="0" placeholder="0"><div class="field-note">This amount will be added to the total treatment fee.</div></div>`;
+  }
+  return html;
+}
 function openInstallmentModal(id){
   const p = findPatient(id); if(!p) return;
   openModal(`
     <div class="modal-head"><h3>Record payment — ${p.name}</h3><button class="close-x" onclick="closeModal()">✕</button></div>
     <div class="field-note" style="margin-bottom:12px;">Total fee: <b>${money(p.fee||0)}</b> · Paid so far: <b>${money(paidSoFar(p))}</b> · Balance: <b>${money(balanceOf(p))}</b></div>
     <div class="grid2">
-      <div class="field"><label>Total treatment fee</label><input type="number" id="iTotalFee" value="${p.fee||''}"></div>
+      ${feeFieldsHtml(p)}
       <div class="field"><label>Amount paid now</label><input type="number" id="iAmount" placeholder="0"></div>
       <div class="field"><label>Payment date</label><input type="date" id="iDate" value="${todayStr()}"></div>
       <div class="field"><label>Next visit (optional)</label><input type="date" id="iNext" value="${p.nextVisit||''}"></div>
@@ -947,11 +961,24 @@ function openInstallmentModal(id){
 }
 function recordPayment(id, viaWa){
   const p = findPatient(id); if(!p) return;
-  const fee = document.getElementById('iTotalFee').value;
+  const feeEl = document.getElementById('iTotalFee');
+  const extraEl = document.getElementById('iExtraFee');
   const amt = Number(document.getElementById('iAmount').value||0);
   const date = document.getElementById('iDate').value || todayStr();
   const next = document.getElementById('iNext').value;
-  if(fee) p.fee = fee;
+  if(!feeIsLocked(p)){
+    // first-time entry of total fee
+    const fee = feeEl ? Number(feeEl.value||0) : 0;
+    if(fee>0) p.fee = fee;
+  } else if(isAdminUser() && extraEl){
+    // only admin can add extra treatment amount
+    const extra = Number(extraEl.value||0);
+    if(extra>0){
+      p.fee = Number(p.fee) + extra;
+      p.feeLog = p.feeLog || [];
+      p.feeLog.push({at:new Date().toISOString(), by:(SESSION.name||'Admin'), extra});
+    }
+  }
   if(amt>0){ p.payments = p.payments||[]; p.payments.push({amount:amt, date}); }
   if(next) p.nextVisit = next;
   saveData();
