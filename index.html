@@ -7,6 +7,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&family=Noto+Sans+Telugu:wght@400;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <style>
   :root{
     --bg:#F4F7F6;
@@ -35,6 +38,7 @@
   button{font-family:var(--font-body);cursor:pointer;}
   input,select,textarea{font-family:var(--font-body);}
   .hidden{display:none !important;}
+  [hidden]{display:none !important;}
 
   /* ---------- Login ---------- */
   #loginScreen{
@@ -239,7 +243,7 @@
     <div class="field">
       <label>Sign in as</label>
       <select id="loginRole">
-        <option value="admin">Admin</option>
+        <option value="admin">admin@smilewell.dental</option>
         <option value="receptionist">Receptionist</option>
         <option value="doctor1">Doctor 1</option>
         <option value="doctor2">Doctor 2</option>
@@ -253,7 +257,7 @@
     <button class="btn btn-primary" id="loginSignInBtn" onclick="doLogin()">Sign in</button>
     <div class="login-error hidden" id="loginError">Incorrect password. Try again.</div>
     <div class="login-hint" id="loginSyncStatus">Starting up…</div>
-    <div class="login-hint">Default password for every account is <b>1234</b>.<br>Admin can change passwords and doctor names after signing in.</div>
+    <div class="login-hint" id="loginHint">Sign in with the password for this account.</div>
   </div>
 </div>
 
@@ -273,6 +277,7 @@
       <div class="who"><b id="whoName"></b><span id="whoRole"></span></div>
       <button class="btn btn-ghost btn-sm" style="width:100%;color:#fff;border-color:rgba(255,255,255,0.25);margin-bottom:6px;" onclick="toggleSidebar()">Hide menu</button>
       <button class="btn btn-ghost btn-sm" style="width:100%;color:#fff;border-color:rgba(255,255,255,0.25);margin-bottom:6px;" onclick="manualSync()">Sync now</button>
+      <button class="btn btn-ghost btn-sm" style="width:100%;color:#fff;border-color:rgba(255,255,255,0.25);margin-bottom:6px;" onclick="openChangePassword()" id="chgPwBtn" hidden>Change password</button>
       <button class="btn btn-ghost btn-sm" style="width:100%;color:#fff;border-color:rgba(255,255,255,0.25);" onclick="logout()">Sign out</button>
     </div>
   </div>
@@ -319,9 +324,212 @@ let SESSION = JSON.parse(sessionStorage.getItem('clinicops_session') || 'null');
 const DEFAULT_SERVER_URL = 'https://script.google.com/macros/s/AKfycbyHBz21nn2tDhWfuXwitcsFtNaFWl-4dkypLeC-NzeJY0SaBL0cldxqq6xOQIyMy6pG/exec';
 const REVIEW_URL = 'https://g.page/r/CWtBljjaLVhKEBM/review';
 /* To change the Google Sheet link, edit DEFAULT_SERVER_URL above. */
+const LEGACY_SHEET_URL = DEFAULT_SERVER_URL;
 let SERVER_URL = DEFAULT_SERVER_URL;
 let SYNC_STATE = SERVER_URL ? 'syncing' : 'local'; // connected | syncing | offline | error | local
 let SYNC_MSG = '';
+/* ===================== FIREBASE ===================== */
+/* Paste your Firebase web-app config here (Firebase console → Project settings → Your apps → Web app). */
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyB4OEZEAEGo4F2QB_zSTq5AfXQnpkUCgoU",
+  authDomain: "swd-dailyoperations.firebaseapp.com",
+  projectId: "swd-dailyoperations",
+  storageBucket: "swd-dailyoperations.firebasestorage.app",
+  messagingSenderId: "795060232123",
+  appId: "1:795060232123:web:1aa3b367e6ad7c73ec6e9e"
+};
+const FB_EMAIL_DOMAIN = 'smilewell.dental';   // staff logins are admin@smilewell.dental, doctor1@smilewell.dental ...
+const FB_ON = !!(window.firebase && FIREBASE_CONFIG.apiKey && !/^PASTE/.test(FIREBASE_CONFIG.apiKey));
+let fbAuth = null, fbDb = null, FB_SAVED = {}, FB_QUEUE = Promise.resolve(), FB_UNSUBS = [];
+if(FB_ON){ firebase.initializeApp(FIREBASE_CONFIG); fbAuth = firebase.auth(); fbDb = firebase.firestore(); }
+const clone = o => JSON.parse(JSON.stringify(o));
+
+if(FB_ON){ SERVER_URL = ''; SYNC_STATE = 'syncing'; }
+function fbConfigDoc(){
+  const users = {};
+  Object.keys(DATA.users||{}).forEach(k=>{ users[k] = DATA.users[k].name ? {name:DATA.users[k].name} : {}; });
+  return clone({ users, settings:DATA.settings||{}, villages:DATA.villages||[], treatments:DATA.treatments||[], idCounter:DATA.idCounter||0 });
+}
+function fbApplyConfig(c){
+  const base = defaultData();
+  Object.keys(base.users).forEach(k=>{
+    const name = c.users && c.users[k] && c.users[k].name;
+    DATA.users[k] = Object.assign({}, DATA.users[k]||{}, name ? {name} : {});
+    delete DATA.users[k].password;
+  });
+  if(c.settings) DATA.settings = c.settings;
+  if(c.villages) DATA.villages = c.villages;
+  if(c.treatments) DATA.treatments = c.treatments;
+  if(typeof c.idCounter==='number') DATA.idCounter = Math.max(DATA.idCounter||0, c.idCounter);
+}
+async function fbLoadAll(){
+  const base = defaultData();
+  Object.keys(base.users).forEach(k=>delete base.users[k].password);
+  DATA = base;
+  const cfg = await fbDb.collection('clinic').doc('config').get();
+  if(cfg.exists){ fbApplyConfig(cfg.data()); FB_SAVED = { __config: JSON.stringify(fbConfigDoc()) }; }
+  else { FB_SAVED = { __config: '' }; }   // first run: config is created on first save
+  const snap = await fbDb.collection('patients').get();
+  DATA.patients = snap.docs.map(d=>d.data());
+  DATA.patients.forEach(p=>{ FB_SAVED[p.id] = JSON.stringify(p); });
+  // keep idCounter ahead of any existing patient number
+  DATA.patients.forEach(p=>{ const n = parseInt(String(p.id).replace(/\D/g,''),10); if(n>(DATA.idCounter||0)) DATA.idCounter = n; });
+  setCache(DATA);
+  SYNC_STATE = 'connected'; SYNC_MSG = 'Synced ' + new Date().toLocaleTimeString();
+}
+/* Only changed patients (and settings) are written, so two devices rarely overwrite each other. */
+function fbPush(){
+  FB_QUEUE = FB_QUEUE.then(async()=>{
+    const ops = [];
+    const cfgJson = JSON.stringify(fbConfigDoc());
+    if(cfgJson !== FB_SAVED.__config) ops.push({ref:fbDb.collection('clinic').doc('config'), json:cfgJson, key:'__config'});
+    DATA.patients.forEach(p=>{
+      const j = JSON.stringify(p);
+      if(FB_SAVED[p.id] !== j) ops.push({ref:fbDb.collection('patients').doc(String(p.id)), json:j, key:p.id});
+    });
+    if(!ops.length) return;
+    SYNC_STATE = 'syncing'; updateSyncBadge();
+    for(let i=0;i<ops.length;i+=400){
+      const chunk = ops.slice(i,i+400), batch = fbDb.batch();
+      chunk.forEach(o=>batch.set(o.ref, JSON.parse(o.json)));
+      await batch.commit();
+      chunk.forEach(o=>{ FB_SAVED[o.key] = o.json; });
+    }
+    SYNC_STATE = 'connected'; SYNC_MSG = 'Synced ' + new Date().toLocaleTimeString(); updateSyncBadge();
+  }).catch(err=>{
+    console.error(err);
+    SYNC_STATE = 'error'; SYNC_MSG = 'Saved on this device only — Firebase save failed (' + (err.code||err.message) + ')';
+    updateSyncBadge();
+  });
+  return FB_QUEUE;
+}
+function fbUnlisten(){ FB_UNSUBS.forEach(u=>{ try{u();}catch(e){} }); FB_UNSUBS = []; }
+function fbAutoRender(){
+  const modalOpen = document.getElementById('modalBg').classList.contains('active');
+  const a = document.activeElement, typing = a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+  if(!modalOpen && !typing && SESSION) render();
+}
+/* Live updates: a patient added on another device appears here without pressing Sync. */
+function fbListen(){
+  fbUnlisten();
+  FB_UNSUBS.push(fbDb.collection('patients').onSnapshot(snap=>{
+    let changed = false;
+    snap.docChanges().forEach(ch=>{
+      if(ch.doc.metadata.hasPendingWrites) return;
+      const p = ch.doc.data(), j = JSON.stringify(p), i = DATA.patients.findIndex(x=>x.id===p.id);
+      if(ch.type==='removed'){ if(i>=0) DATA.patients.splice(i,1); delete FB_SAVED[p.id]; changed = true; return; }
+      if(FB_SAVED[p.id] === j) return;
+      if(i>=0){ const o = DATA.patients[i]; Object.keys(o).forEach(k=>delete o[k]); Object.assign(o,p); } else DATA.patients.push(p);
+      FB_SAVED[p.id] = j; changed = true;
+    });
+    if(changed){ setCache(DATA); fbAutoRender(); }
+  }, err=>console.warn('patients listener', err)));
+  FB_UNSUBS.push(fbDb.collection('clinic').doc('config').onSnapshot(d=>{
+    if(!d.exists || d.metadata.hasPendingWrites) return;
+    fbApplyConfig(d.data());
+    const j = JSON.stringify(fbConfigDoc());
+    if(j !== FB_SAVED.__config){ FB_SAVED.__config = j; setCache(DATA); fbAutoRender(); }
+  }, err=>console.warn('config listener', err)));
+}
+async function fbStart(expectedRole){
+  const user = fbAuth.currentUser;
+  const st = await fbDb.collection('staff').doc(user.uid).get();
+  if(!st.exists || !(st.data().role in {admin:1,receptionist:1,doctor1:1,doctor2:1,doctor3:1})){
+    await fbAuth.signOut(); const e = new Error('no-staff'); e.code = 'no-staff'; throw e;
+  }
+  const role = String(st.data().role||'').trim().toLowerCase();
+  if(expectedRole && role !== expectedRole){ const uidShown = user.uid, emailShown = user.email; await fbAuth.signOut(); const e = new Error('wrong-role'); e.code = 'wrong-role'; e.detail = ' You signed in as ' + emailShown + ' (UID ' + uidShown + '), whose staff record says role "' + st.data().role + '", but you selected "' + expectedRole + '".'; throw e; }
+  await fbLoadAll();
+  fbListen();
+  const u = DATA.users[role] || {};
+  SESSION = { role, name: u.name || (role==='admin'?'Admin':role==='receptionist'?'Receptionist':role) };
+  sessionStorage.setItem('clinicops_session', JSON.stringify(SESSION));
+  boot();
+}
+async function fbLogin(){
+  const role = document.getElementById('loginRole').value;
+  const pw = document.getElementById('loginPassword').value;
+  const err = document.getElementById('loginError'), btn = document.getElementById('loginSignInBtn');
+  err.classList.add('hidden'); btn.disabled = true;
+  try{
+    await fbAuth.signInWithEmailAndPassword(role + '@' + FB_EMAIL_DOMAIN, pw);
+    await fbStart(role);
+    document.getElementById('loginPassword').value = '';
+  }catch(e){
+    const bad = ['auth/wrong-password','auth/invalid-credential','auth/user-not-found','auth/invalid-email'].includes(e.code);
+    err.textContent = bad ? 'Incorrect password, or no Firebase user exists with the email ' + role + '@' + FB_EMAIL_DOMAIN + ' (' + e.code + ').'
+      : e.code==='no-staff' ? 'This account is not set up as clinic staff yet. Ask Admin.'
+      : e.code==='wrong-role' ? 'This account does not match the selected role.' + (e.detail||'')
+      : e.code==='auth/too-many-requests' ? 'Too many attempts. Wait a few minutes and try again.'
+      : e.code==='permission-denied' ? 'Signed in, but the database rules blocked reading the staff record (permission-denied). Check the staff document ID and role.'
+      : 'Could not sign in (' + (e.code||e.message) + ').';
+    err.classList.remove('hidden');
+  }
+  btn.disabled = false;
+}
+/* ===================== CHANGE OWN PASSWORD (Firebase) ===================== */
+function openChangePassword(){
+  if(!FB_ON || !fbAuth || !fbAuth.currentUser){ alert('Password change is available when signed in with Firebase.'); return; }
+  openModal(`
+    <div class="modal-head"><h3>Change password</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="field"><label>Current password</label><input type="password" id="cpCur" autocomplete="current-password"></div>
+    <div class="field"><label>New password</label><input type="password" id="cpNew" autocomplete="new-password" placeholder="At least 6 characters"></div>
+    <div class="field"><label>Confirm new password</label><input type="password" id="cpNew2" autocomplete="new-password"></div>
+    <div id="cpMsg" class="field-note" style="margin-bottom:10px;"></div>
+    <div style="display:flex;gap:10px;"><button class="btn btn-primary" id="cpBtn" onclick="doChangePassword()">Update password</button><button class="btn btn-ghost" onclick="closeModal()">Cancel</button></div>
+  `);
+  setTimeout(()=>{ const c=document.getElementById('cpCur'); if(c) c.focus(); }, 50);
+}
+async function doChangePassword(){
+  const cur = document.getElementById('cpCur').value;
+  const n1 = document.getElementById('cpNew').value;
+  const n2 = document.getElementById('cpNew2').value;
+  const msg = document.getElementById('cpMsg'), btn = document.getElementById('cpBtn');
+  const fail = t=>{ msg.style.color = '#b42318'; msg.textContent = t; };
+  msg.textContent = '';
+  if(!cur || !n1 || !n2) return fail('Please fill in all three fields.');
+  if(n1.length < 6) return fail('New password must be at least 6 characters.');
+  if(n1 !== n2) return fail('The new passwords do not match.');
+  if(n1 === cur) return fail('The new password must be different from the current one.');
+  const user = fbAuth.currentUser;
+  if(!user) return fail('You are signed out. Please sign in again.');
+  btn.disabled = true; msg.style.color = ''; msg.textContent = 'Updating…';
+  try{
+    const cred = firebase.auth.EmailAuthProvider.credential(user.email, cur);
+    await user.reauthenticateWithCredential(cred);
+    await user.updatePassword(n1);
+    msg.style.color = '#067647'; msg.textContent = 'Password updated. Use the new password next time you sign in.';
+    setTimeout(closeModal, 1800);
+  }catch(e){
+    btn.disabled = false;
+    if(['auth/wrong-password','auth/invalid-credential'].includes(e.code)) fail('Current password is incorrect.');
+    else if(e.code==='auth/weak-password') fail('New password is too weak. Use at least 6 characters.');
+    else if(e.code==='auth/too-many-requests') fail('Too many attempts. Wait a few minutes and try again.');
+    else if(e.code==='auth/requires-recent-login') fail('Please sign out, sign in again, and then change the password.');
+    else fail('Could not change password (' + (e.code||e.message) + ').');
+  }
+}
+/* One-time copy of the old Google Sheet data into Firebase (admin only, from Villages, Fee & Treatments). */
+async function importFromSheet(){
+  if(!confirm('Copy all patients and settings from the old Google Sheet into Firebase? Patients with the same ID will be overwritten.')) return;
+  try{
+    const res = await fetch(LEGACY_SHEET_URL), remote = await res.json();
+    if(!(remote && remote.ok && remote.data)) throw new Error('The Sheet sent no data.');
+    const r = remote.data;
+    if(r.settings) DATA.settings = r.settings;
+    if(r.villages) DATA.villages = r.villages;
+    if(r.treatments) DATA.treatments = r.treatments;
+    DATA.idCounter = Math.max(DATA.idCounter||0, r.idCounter||0);
+    Object.keys(r.users||{}).forEach(k=>{ if(DATA.users[k] && r.users[k].name) DATA.users[k].name = r.users[k].name; });
+    DATA.patients = r.patients || [];
+    FB_SAVED = {};            // forces everything to be written
+    setCache(DATA);
+    await fbPush();
+    alert('Imported ' + DATA.patients.length + ' patients into Firebase.');
+    render();
+  }catch(e){ alert('Import failed: ' + (e.message||e)); }
+}
+
 
 /* Pull the latest data down from the connected Google Sheet. Falls back to cache on failure. */
 async function initData(){
@@ -363,6 +571,7 @@ async function initData(){
 /* Save locally right away, then push the full dataset up to the Sheet in the background. */
 function saveData(){
   setCache(DATA);
+  if(FB_ON){ if(SESSION) fbPush(); return; }
   pushToServer();
 }
 function pushToServer(){
@@ -384,11 +593,11 @@ function pushToServer(){
 function updateSyncBadge(){
   const el = document.getElementById('syncBadge');
   const map = {
-    connected:{c:'#57D9C4', t:'Synced to Sheet'},
+    connected:{c:'#57D9C4', t:FB_ON?'Synced to Firebase':'Synced to Sheet'},
     syncing:{c:'#E8C46B', t:'Syncing…'},
     offline:{c:'#E8C46B', t:'Offline — last synced copy'},
     error:{c:'#F0938C', t:'Sync error — saved locally'},
-    local:{c:'rgba(255,255,255,0.5)', t:'No Sheet connected'}
+    local:{c:'rgba(255,255,255,0.5)', t:FB_ON?'Not connected':'No Sheet connected'}
   };
   const s = map[SYNC_STATE] || map.local;
   if(el) el.innerHTML = `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${s.c};margin-right:6px;"></span>${s.t}`;
@@ -412,6 +621,7 @@ function disconnectServer(){
   render();
 }
 async function manualSync(){
+  if(FB_ON){ try{ await fbLoadAll(); }catch(e){ SYNC_STATE='error'; SYNC_MSG='Could not reach Firebase.'; } render(); return; }
   if(!SERVER_URL){ alert('No Google Sheet connected yet. Go to Admin → Cloud Sync.'); return; }
   await initData();
   render();
@@ -432,6 +642,7 @@ function toggleSidebar(){
 
 /* ===================== LOGIN ===================== */
 function doLogin(){
+  if(FB_ON){ fbLogin(); return; }
   const role = document.getElementById('loginRole').value;
   const pw = document.getElementById('loginPassword').value;
   const u = DATA.users[role];
@@ -446,6 +657,7 @@ function doLogin(){
   boot();
 }
 function logout(){
+  if(FB_ON){ fbUnlisten(); fbAuth.signOut(); }
   SESSION = null;
   sessionStorage.removeItem('clinicops_session');
   document.getElementById('app').classList.remove('active');
@@ -1224,8 +1436,8 @@ function accountRow(key, label, editableName){
   return `
     <div class="grid3" style="align-items:end;">
       ${editableName ? `<div class="field"><label>Display name</label><input type="text" id="name_${key}" value="${u.name}"></div>` : `<div class="field"><label>Account</label><input type="text" value="${label}" disabled></div>`}
-      <div class="field"><label>New password</label><input type="password" id="pw_${key}" placeholder="Leave blank to keep current"></div>
-      <div><button class="btn btn-ghost" onclick="saveAccount('${key}')">Save changes</button></div>
+      ${FB_ON ? `<div class="field-note" style="padding-bottom:10px;">Each person changes their own password with “Change password” in the left menu. (A forgotten password must be reset in Firebase Console → Authentication.)</div>` : `<div class="field"><label>New password</label><input type="password" id="pw_${key}" placeholder="Leave blank to keep current"></div>`}
+      <div>${(FB_ON && !editableName) ? '' : `<button class="btn btn-ghost" onclick="saveAccount('${key}')">Save changes</button>`}</div>
     </div>`;
 }
 function saveAccount(key){
@@ -1243,10 +1455,11 @@ RENDERERS.settings = function(){
   document.getElementById('mainArea').innerHTML = `
     <div class="page-head"><div><div class="eyebrow">Admin</div><h2>Villages, Fee & Treatments</h2><p>Controls what receptionists and doctors see in dropdowns.</p></div></div>
     <div class="card">
-      <h3>Cloud Sync — Google Sheet</h3>
-      <div class="field-note" style="margin-bottom:12px;">This device is connected to the clinic's Google Sheet, so every login shares the same live data.</div>
+      <h3>Cloud Sync — ${FB_ON?'Firebase':'Google Sheet'}</h3>
+      <div class="field-note" style="margin-bottom:12px;">${FB_ON ? 'Data is stored in Firebase. Every login shares the same live data, and changes on other devices appear automatically.' : 'This device is connected to the clinic\'s Google Sheet, so every login shares the same live data.'}</div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px;">
         <button class="btn btn-ghost" onclick="manualSync()">Sync now</button>
+        ${FB_ON?'<button class="btn btn-ghost" onclick="importFromSheet()">Import old data from Google Sheet</button>':''}
         <span id="syncBadgeSettings" style="font-size:12.5px;color:var(--ink-soft);display:flex;align-items:center;"></span>
       </div>
     </div>
@@ -1333,6 +1546,25 @@ function exportExcel(){
 async function initApp(){
   const btn = document.getElementById('loginSignInBtn');
   const status = document.getElementById('loginSyncStatus');
+  if(FB_ON){
+    SESSION = null; sessionStorage.removeItem('clinicops_session');
+    const hint = document.getElementById('loginHint');
+    if(hint) hint.innerHTML = 'Sign in with the password your admin set for this account.';
+    const cpb = document.getElementById('chgPwBtn'); if(cpb) cpb.hidden = false;
+    if(btn) btn.disabled = true;
+    if(status) status.textContent = 'Connecting to Firebase…';
+    try{
+      await fbAuth.setPersistence(firebase.auth.Auth.Persistence.SESSION);
+      const user = await new Promise(res=>{ const un = fbAuth.onAuthStateChanged(u=>{ un(); res(u); }); });
+      if(user){ try{ await fbStart(null); return; }catch(e){ console.warn(e); } }
+      if(status) status.textContent = 'Connected to Firebase. Sign in to continue.';
+    }catch(e){
+      if(status) status.textContent = 'Could not reach Firebase — check the internet connection.';
+    }
+    if(btn) btn.disabled = false;
+    boot();
+    return;
+  }
   if(SERVER_URL){
     if(btn) btn.disabled = true;
     if(status) status.textContent = 'Connecting to your Google Sheet…';
